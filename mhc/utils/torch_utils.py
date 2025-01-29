@@ -1,4 +1,4 @@
-# Copyright (c) 2018-2022, NVIDIA Corporation
+# Copyright (c) 2018-2023, NVIDIA Corporation
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -26,10 +26,33 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import torch
 import numpy as np
 
 from isaacgym.torch_utils import *
+import torch
+from torch import nn
+import utils.pytorch3d_transforms as ptr
+import torch.nn.functional as F
+
+
+def project_to_norm(x, norm=5, z_type = "sphere"):
+    if z_type == "sphere":
+        x = x / (torch.norm(x, dim=-1, keepdim=True) / norm + 1e-8)
+    elif z_type == "uniform":
+        x = torch.clamp(x, -norm, norm)
+    return x
+
+@torch.jit.script
+def my_quat_rotate(q, v):
+    shape = q.shape
+    q_w = q[:, -1]
+    q_vec = q[:, :3]
+    a = v * (2.0 * q_w**2 - 1.0).unsqueeze(-1)
+    b = torch.cross(q_vec, v, dim=-1) * q_w.unsqueeze(-1) * 2.0
+    c = q_vec * \
+        torch.bmm(q_vec.view(shape[0], 1, 3), v.view(
+            shape[0], 3, 1)).squeeze(-1) * 2.0
+    return a + b + c
 
 @torch.jit.script
 def quat_to_angle_axis(q):
@@ -54,6 +77,7 @@ def quat_to_angle_axis(q):
     axis = torch.where(mask_expand, axis, default_axis)
     return angle, axis
 
+
 @torch.jit.script
 def angle_axis_to_exp_map(angle, axis):
     # type: (Tensor, Tensor) -> Tensor
@@ -61,6 +85,7 @@ def angle_axis_to_exp_map(angle, axis):
     angle_expand = angle.unsqueeze(-1)
     exp_map = angle_expand * axis
     return exp_map
+
 
 @torch.jit.script
 def quat_to_exp_map(q):
@@ -71,20 +96,46 @@ def quat_to_exp_map(q):
     exp_map = angle_axis_to_exp_map(angle, axis)
     return exp_map
 
+
 @torch.jit.script
 def quat_to_tan_norm(q):
     # type: (Tensor) -> Tensor
     # represents a rotation using the tangent and normal vectors
     ref_tan = torch.zeros_like(q[..., 0:3])
     ref_tan[..., 0] = 1
-    tan = quat_rotate(q, ref_tan)
-    
+    tan = my_quat_rotate(q, ref_tan)
+
     ref_norm = torch.zeros_like(q[..., 0:3])
     ref_norm[..., -1] = 1
-    norm = quat_rotate(q, ref_norm)
-    
+    norm = my_quat_rotate(q, ref_norm)
+
     norm_tan = torch.cat([tan, norm], dim=len(tan.shape) - 1)
     return norm_tan
+
+
+@torch.jit.script
+def tan_norm_to_mat(tan_norm):
+    B = tan_norm.shape[0]
+    tan = tan_norm.view(-1, 2, 3)[:, 0]
+    norm = tan_norm.view(-1, 2, 3)[:, 1]
+    tan_n = F.normalize(tan, dim=-1)
+
+    norm_n = norm - (tan_n * norm).sum(-1, keepdim=True) * tan_n
+    norm_n = F.normalize(norm_n, dim=-1)
+
+    cross = torch.cross(norm_n, tan_n)
+
+    rot_mat = torch.stack([tan_n, cross, norm_n], dim=-1).reshape(B, -1, 3, 3)
+    return rot_mat
+
+
+@torch.jit.script
+def tan_norm_to_quat(tan_norm):
+    B = tan_norm.shape[0]
+    rot_mat = tan_norm_to_mat(tan_norm)
+    quat_new = ptr.matrix_to_quaternion_ijkr(rot_mat).view(B, -1, 4)
+    return quat_new
+
 
 @torch.jit.script
 def euler_xyz_to_exp_map(roll, pitch, yaw):
@@ -92,6 +143,7 @@ def euler_xyz_to_exp_map(roll, pitch, yaw):
     q = quat_from_euler_xyz(roll, pitch, yaw)
     exp_map = quat_to_exp_map(q)
     return exp_map
+
 
 @torch.jit.script
 def exp_map_to_angle_axis(exp_map):
@@ -112,11 +164,13 @@ def exp_map_to_angle_axis(exp_map):
 
     return angle, axis
 
+
 @torch.jit.script
 def exp_map_to_quat(exp_map):
     angle, axis = exp_map_to_angle_axis(exp_map)
     q = quat_from_angle_axis(angle, axis)
     return q
+
 
 @torch.jit.script
 def slerp(q0, q1, t):
@@ -125,16 +179,17 @@ def slerp(q0, q1, t):
 
     neg_mask = cos_half_theta < 0
     q1 = q1.clone()
+    print('\n debug 1')
     q1[neg_mask] = -q1[neg_mask]
     cos_half_theta = torch.abs(cos_half_theta)
     cos_half_theta = torch.unsqueeze(cos_half_theta, dim=-1)
 
-    half_theta = torch.acos(cos_half_theta);
-    sin_half_theta = torch.sqrt(1.0 - cos_half_theta * cos_half_theta);
+    half_theta = torch.acos(cos_half_theta)
+    sin_half_theta = torch.sqrt(1.0 - cos_half_theta * cos_half_theta)
 
-    ratioA = torch.sin((1 - t) * half_theta) / sin_half_theta;
-    ratioB = torch.sin(t * half_theta) / sin_half_theta; 
-    
+    ratioA = torch.sin((1 - t) * half_theta) / sin_half_theta
+    ratioB = torch.sin(t * half_theta) / sin_half_theta
+
     new_q = ratioA * q0 + ratioB * q1
 
     new_q = torch.where(torch.abs(sin_half_theta) < 0.001, 0.5 * q0 + 0.5 * q1, new_q)
@@ -142,18 +197,21 @@ def slerp(q0, q1, t):
 
     return new_q
 
+
 @torch.jit.script
 def calc_heading(q):
     # type: (Tensor) -> Tensor
     # calculate heading direction from quaternion
     # the heading is the direction on the xy plane
     # q must be normalized
+    # this is the x axis heading
     ref_dir = torch.zeros_like(q[..., 0:3])
     ref_dir[..., 0] = 1
-    rot_dir = quat_rotate(q, ref_dir)
+    rot_dir = my_quat_rotate(q, ref_dir)
 
     heading = torch.atan2(rot_dir[..., 1], rot_dir[..., 0])
     return heading
+
 
 @torch.jit.script
 def calc_heading_quat(q):
@@ -168,6 +226,7 @@ def calc_heading_quat(q):
     heading_q = quat_from_angle_axis(heading, axis)
     return heading_q
 
+
 @torch.jit.script
 def calc_heading_quat_inv(q):
     # type: (Tensor) -> Tensor
@@ -180,3 +239,23 @@ def calc_heading_quat_inv(q):
 
     heading_q = quat_from_angle_axis(-heading, axis)
     return heading_q
+
+def activation_facotry(act_name):
+    if act_name == 'relu':
+        return nn.ReLU
+    elif act_name == 'tanh':
+        return nn.Tanh
+    elif act_name == 'sigmoid':
+        return nn.Sigmoid
+    elif act_name == "elu":
+        return nn.ELU
+    elif act_name == "selu":
+        return nn.SELU
+    elif act_name == "silu":
+        return nn.SiLU
+    elif act_name == "gelu":
+        return nn.GELU
+    elif act_name == "softplus":
+        nn.Softplus
+    elif act_name == "None":
+        return nn.Identity

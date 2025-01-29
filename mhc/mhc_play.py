@@ -133,7 +133,7 @@ if __name__ == "__main__":
     player.env.task._update_camera = MethodType(custom_update_camera, player.env.task)
 
     # Restore from wandb
-    run = wandb.init(entity = "dacmdp", project="amp_debug", name = "VisualizeRun" + datetime.now().strftime("_%y%m%d-%H%M%S"))
+    run = wandb.init(entity = "calebpersonal", project="amp_debug", name = "VisualizeRun" + datetime.now().strftime("_%y%m%d-%H%M%S"))
     player.restore_from_wandb(args.wandb_path)
 
     # Seeding Run Variables

@@ -15,6 +15,7 @@ env:
   recoveryEpisodeProb: 0.2
   recoverySteps: 60
   fallInitProb: 0.1
+  min_length: 5
   
   localRootObs: True
   keyBodies: ["R_Wrist", "L_Wrist", "R_Ankle", "L_Ankle"]

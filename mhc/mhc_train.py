@@ -14,6 +14,7 @@ import numpy as np
 import wandb
 from datetime import datetime
 from types import MethodType
+from joblib import load
 
 # AMP Imports
 from learning.amp_models import ModelAMPContinuous
@@ -344,7 +345,9 @@ def parse_mhc_args_and_config():
     # Demo Motion IDs Setup
     args.demo_motion_ids = [int(x) for x in args.demo_motion_ids.split(',')]
     if len(args.demo_motion_ids) == 1 and args.demo_motion_ids[0] == 9999:
-        num_motions = len(yaml.safe_load(open(args.motion_file, 'r'))['motions'])
+        data = load(args.motion_file)
+        num_motions = len(data) # data is loaded as a dict, each entry is a motion 
+        #num_motions = len(yaml.safe_load(open(args.motion_file, 'r'))['motions'])
         args.demo_motion_ids = list(range(num_motions))
     
 
@@ -379,7 +382,7 @@ if __name__ == "__main__":
 
     # Initialize Wandb
     wandb.init(
-        entity = 'dacmdp',
+        entity = 'calebpersonal',
         project = args.wandb_project if not args.debug else "catchup_amp_debug",
         name = args.experiment_name,
         config={ "info": "v1: disc sn",

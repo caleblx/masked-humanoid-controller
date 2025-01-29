@@ -11,6 +11,7 @@ from tqdm import tqdm
 from enum import Enum
 from munch import Munch
 from munch import munchify
+from easydict import EasyDict
 
 # Env Imports
 from env.tasks.humanoid import Humanoid, dof_to_obs
@@ -18,6 +19,9 @@ from env.tasks.humanoid import Humanoid, dof_to_obs
 # Utils Imports
 from utils import torch_utils
 from utils.inv_kin_motion_lib import InvKinMotionLib
+from utils.motion_lib_smpl import MotionLibSMPL
+from utils.motion_lib_base import FixHeightMode
+from utils.flags import flags
 
 
 # This is to be the simplest version where a MHC can be trained and evaluated. 
@@ -76,8 +80,24 @@ class ObsBuilder:
         body_ids = torch.arange(task._rigid_body_pos.size(-2)).to(device)
         
         # Get all body positions as lookahaead
-        root_pos, root_rot, dof_pos, root_vel, root_ang_vel, dof_vel, key_pos \
-            = task._motion_lib.get_motion_state(mids, mts, key_body_ids = body_ids)
+        #root_pos, root_rot, dof_pos, root_vel, root_ang_vel, dof_vel, key_pos \
+        #    = task._motion_lib.get_motion_state(mids, mts, key_body_ids = body_ids)
+
+
+        # Using new motion lib
+
+        result = task._motion_lib.get_motion_state(mids, mts)
+        
+        root_pos = result['root_pos']
+        root_rot = result['root_rot']
+        dof_pos = result['dof_pos']
+        root_vel = result['root_vel']
+        root_ang_vel = result['root_ang_vel']
+        dof_vel = result['dof_vel']
+
+        rg_pos = result['rg_pos']
+        key_pos = rg_pos[:, body_ids, :] # need to verify this output
+
         full_state_obs = ObsBuilder.build_full_state_observations(root_pos.cuda(), root_rot.cuda(), root_vel.cuda(), root_ang_vel.cuda(),
                                             dof_pos.cuda(), dof_vel.cuda(), key_pos.cuda(),
                                             task.obs_flags["local_root_obs"], task.obs_flags["root_height_obs"],
@@ -91,6 +111,7 @@ class ObsBuilder:
                 "dof_vel": dof_vel,
                 "key_pos": key_pos
                 }
+        
         return full_state_obs, info
     
     @staticmethod
@@ -724,7 +745,7 @@ class DemoStoreUtils:
         demo_store["demo_names"] = [""]*num_demos
         for motion_id in range(len(DEMO_DICTS)):
             demo_store["demo_lengths"][motion_id] = int(task._motion_lib._motion_lengths[motion_id]/task.dt)
-            demo_store["demo_names"][motion_id] = task._motion_lib._motion_files[motion_id].split("/")[-1].replace(".npy","")
+            #demo_store["demo_names"][motion_id] = task._motion_lib._motion_files[motion_id].split("/")[-1].replace(".npy","")
         # ------------------------------------------------------------------------------------------------
         return demo_store
 
@@ -832,6 +853,7 @@ class HumanoidAMPRobust(Humanoid):
         self._enable_lookahead_mask = cfg["env"]["enable_lookahead_mask"]
         self._use_predefined_demo_weights_for_sampling = cfg["env"]["use_predefined_demo_weights_for_sampling"]
         self._start_demo_at_agent_state_prob = cfg["env"]["start_demo_at_agent_state_prob"]
+        self._min_motion_len = cfg["env"].get("min_length", -1)
 
         self._disable_lk_mask_0 = cfg["env"]["disable_lk_mask_0"]
         self._disable_lk_mask_1 = cfg["env"]["disable_lk_mask_1"]
@@ -1734,6 +1756,7 @@ class HumanoidAMPRobust(Humanoid):
         num_reset_envs = env_ids.shape[0]
         motion_ids = self._sample_demo_motions(num_reset_envs)
         if (self._demo_init == HumanoidAMPRobust.StateInit.Random or self._demo_init == HumanoidAMPRobust.StateInit.Hybrid):
+            motion_ids = torch.remainder(motion_ids, 256)
             motion_times = self._motion_lib.sample_time(motion_ids).to(self.device)
         elif (self._demo_init == HumanoidAMPRobust.StateInit.Start):
             motion_times = torch.zeros(num_reset_envs, device=self.device)
@@ -1911,7 +1934,7 @@ class HumanoidAMPRobust(Humanoid):
         self.extras["tar_lookahead_mask"] = self._global_demo_lookahead_mask.clone()
 
         # debug viz
-        if self.viewer and self.flags["debug_viz"]:
+        if self.viewer and self.cfg['env']["enableDebugVis"]:
             self._update_debug_viz()
 
         self._prev_action_buf[:] = self.actions
@@ -1942,6 +1965,7 @@ class HumanoidAMPRobust(Humanoid):
         # since negative times are added to these values in build_amp_obs_demo,
         # we shift them into the range [0 + truncate_time, end of clip]
         truncate_time = self.dt * (self._num_amp_obs_steps - 1)
+        motion_ids = torch.remainder(motion_ids, self.cfg['env']['numEnvs'])
         motion_times0 = self._motion_lib.sample_time(motion_ids, truncate_time=truncate_time)
         motion_times0 += truncate_time
 
@@ -1962,9 +1986,24 @@ class HumanoidAMPRobust(Humanoid):
 
         motion_ids = motion_ids.view(-1)
         motion_times = motion_times.view(-1)
-        root_pos, root_rot, dof_pos, root_vel, root_ang_vel, dof_vel, key_pos \
-               = self._motion_lib.get_motion_state(motion_ids.to(self._motion_lib._device), 
-                                                motion_times.to(self._motion_lib._device))
+
+
+        #root_pos, root_rot, dof_pos, root_vel, root_ang_vel, dof_vel, key_pos \
+        #       = self._motion_lib.get_motion_state(motion_ids.to(self._motion_lib._device), 
+        #                                        motion_times.to(self._motion_lib._device))
+        
+        result = self._motion_lib.get_motion_state(motion_ids.to(self._motion_lib._device), 
+                                                   motion_times.to(self._motion_lib._device))
+        
+        root_pos = result['root_pos']
+        root_rot = result['root_rot']
+        dof_pos = result['dof_pos']
+        root_vel = result['root_vel']
+        root_ang_vel = result['root_ang_vel']
+        dof_vel = result['dof_vel']
+
+        rg_pos = result['rg_pos']
+        #key_pos = rg_pos[:, body_ids, :] # need to verify this output
         
         full_state_obs_demo, full_state_obs_info = ObsBuilder.get_full_state_obs_from_motion_frame(self, motion_ids, motion_times)
         amp_obs_demo = full_state_obs_demo[:, self._full_state_amp_obs_indxs]
@@ -2102,18 +2141,30 @@ class HumanoidAMPRobust(Humanoid):
             motion_ids = manual_motion_ids
             motion_times = manual_motion_timesteps
         else:
-            motion_ids = self._sample_start_state_motions(num_envs) # RobustAddtionalCodeLine
+            motion_ids = self._sample_start_state_motions(num_envs) # RobustAddtionalCodeLine, not sure why we have incorrect num_envs *
+            motion_ids = torch.remainder(motion_ids, self.cfg['env']['numEnvs'])
 
             if (self._state_init == HumanoidAMPRobust.StateInit.Random
                 or self._state_init == HumanoidAMPRobust.StateInit.Hybrid):
-                motion_times = self._motion_lib.sample_time(motion_ids).to(self.device)
+                motion_times = self._motion_lib.sample_time(motion_ids).to(self.device)   # mismatch between AMPRobust, passing fall ids, and motion lib expecting
+                                                                                          # motions_ids, which i think is all env_ids. e.g. expect 256
             elif (self._state_init == HumanoidAMPRobust.StateInit.Start):
                 motion_times = torch.zeros(num_envs, device=self.device)
             else:
                 assert(False), "Unsupported state initialization strategy: {:s}".format(str(self._state_init))
 
-        root_pos, root_rot, dof_pos, root_vel, root_ang_vel, dof_vel, key_pos \
-               = self._motion_lib.get_motion_state(motion_ids.to(self._motion_lib._device), motion_times.to(self._motion_lib._device))
+
+        result = self._motion_lib.get_motion_state(motion_ids.to(self._motion_lib._device), motion_times.to(self._motion_lib._device))
+
+        root_pos = result['root_pos']
+        root_rot = result['root_rot']
+        dof_pos = result['dof_pos']
+        root_vel = result['root_vel']
+        root_ang_vel = result['root_ang_vel']
+        dof_vel = result['dof_vel']
+
+        #rg_pos = result['rg_pos']
+        #key_pos = rg_pos[:, body_ids, :] # filter by the body ids this is the same as keybody ids
 
         # RobustAdditionalCodeBlock
         # ------------------------------------------------------------
@@ -2332,21 +2383,42 @@ class HumanoidAMPRobust(Humanoid):
     # OVer load to add some cache mechanisms.
     def _load_motion(self, motion_file):
         assert(self._dof_offsets[-1] == self.num_dof)
-        self._motion_lib = InvKinMotionLib(motion_file=motion_file,
-                                     dof_body_ids=self._dof_body_ids,
-                                     dof_offsets=self._dof_offsets,
-                                     key_body_ids=self._key_body_ids.cpu().numpy(), 
-                                     device=self._motion_lib_device)
 
-        if self._motion_is_sampled_by_frames:
-            self._demo_motion_frames_weights = torch.ones((self._motion_lib._motion_num_frames.sum(),), device=self.device)
-            self._start_state_motion_frames_weights = torch.ones((self._motion_lib._motion_num_frames.sum(),), device=self.device)
+        if self.humanoid_type in ["smpl", "smplh", "smplx"]:
+            motion_lib_cfg = EasyDict({
+                "motion_file": motion_file,
+                "device": torch.device("cpu"),
+                "fix_height": FixHeightMode.full_fix,
+                "min_length": self._min_motion_len,
+                "max_length": -1,
+                "im_eval": flags.im_eval,
+                "multi_thread": not self.cfg.disable_multiprocessing ,
+                "smpl_type": self.robot_cfg.humanoid_type,
+                "randomrize_heading": True,
+                "device": self.device,
+                "step_dt": self.dt,
+            })
 
-            self.frame_to_motion_id = torch.zeros((self._motion_lib._motion_num_frames.sum(),), device=self.device, dtype=torch.long)
-            # self.frame_to_motion_times = torch.zeros((self._motion_lib._motion_num_frames.sum(),), device=self.device, dtype=torch.float)
-            for i in range(len(self._motion_lib._motion_num_frames)):
-                self.frame_to_motion_id[self._motion_lib._motion_num_frames[:i].sum():self._motion_lib._motion_num_frames[:i+1].sum()] = i
-                # self.frame_to_motion_times[self._motion_lib._motion_num_frames[:i].sum():self._motion_lib._motion_num_frames[:i+1].sum()] = torch.arange(self._motion_lib._motion_num_frames[i], device=self.device) * self._motion_lib._motion_dt[i]
+            self._motion_train_lib = MotionLibSMPL(motion_lib_cfg)
+            motion_lib_cfg.im_eval = True
+            self._motion_eval_lib = MotionLibSMPL(motion_lib_cfg)
+
+            self._motion_lib = self._motion_train_lib
+            self._motion_lib.load_motions(skeleton_trees=self.skeleton_trees, gender_betas=self.humanoid_shapes.cpu(),
+                                          limb_weights=self.humanoid_limb_and_weights.cpu())
+
+  
+
+
+        #if self._motion_is_sampled_by_frames:
+        #    self._demo_motion_frames_weights = torch.ones((self._motion_lib._motion_num_frames.sum(),), device=self.device)
+        #    self._start_state_motion_frames_weights = torch.ones((self._motion_lib._motion_num_frames.sum(),), device=self.device)
+
+        #    self.frame_to_motion_id = torch.zeros((self._motion_lib._motion_num_frames.sum(),), device=self.device, dtype=torch.long)
+        #    # self.frame_to_motion_times = torch.zeros((self._motion_lib._motion_num_frames.sum(),), device=self.device, dtype=torch.float)
+        #    for i in range(len(self._motion_lib._motion_num_frames)):
+        #        self.frame_to_motion_id[self._motion_lib._motion_num_frames[:i].sum():self._motion_lib._motion_num_frames[:i+1].sum()] = i
+        #        # self.frame_to_motion_times[self._motion_lib._motion_num_frames[:i].sum():self._motion_lib._motion_num_frames[:i+1].sum()] = torch.arange(self._motion_lib._motion_num_frames[i], device=self.device) * self._motion_lib._motion_dt[i]
 
         return
 

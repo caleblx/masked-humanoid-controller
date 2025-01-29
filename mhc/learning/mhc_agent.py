@@ -131,8 +131,8 @@ class AMPAgent2(AMPAgent):
             self.current_penalties = self.current_penalties * not_dones.unsqueeze(1)
             self.current_lengths = self.current_lengths * not_dones
             
-            if (self.vec_env.env.task.viewer):
-                self._amp_debug(infos)
+            #if (self.vec_env.env.task.viewer):
+                #self._amp_debug(infos)
                 
             done_indices = done_indices[:, 0]
             if len(done_indices) > 0:

@@ -35,7 +35,7 @@ class AMPPlayer2(AMPPlayerContinuous):
 
         self.num_envs = self.env.task.num_envs
         self.num_demo_envs = 1
-        self.motion_files = [f.split('/')[-1] for f in self.env.task._motion_lib._motion_files]
+        #self.motion_files = [f.split('/')[-1] for f in self.env.task._motion_lib._motion_files]
         self.motion_lengths = self.env.task._motion_lib._motion_lengths
         self.n_motions = len(self.motion_lengths)
 
